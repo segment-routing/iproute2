@@ -48,4 +48,32 @@ struct ip6_tnl_parm2 {
 	__be32			o_key;
 };
 
+struct ip6_tnl_txopts {
+        int tot_len;
+        __u16   opt_flen;
+        __u16   opt_nflen;
+
+        long hopopt_offset;
+        long dst0opt_offset;
+        long srcrt_offset;
+        long dst1opt_offset;
+
+        /* option data starts here */
+};
+
+struct ipv6_sr_hdr {
+        __u8            nexthdr;
+        __u8            hdrlen;
+        __u8            type;
+        __u8            segments_left;
+        __u8            first_segment;
+
+        __u8            flag_1;
+        __u8            flag_2;
+
+        __u8            hmackeyid;
+
+        struct in6_addr segments[0];
+} __attribute__((packed));
+
 #endif

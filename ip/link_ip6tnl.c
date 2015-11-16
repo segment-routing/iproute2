@@ -55,6 +55,56 @@ static void usage(void)
 	exit(-1);
 }
 
+static int parse_srh_opts(const char *argv, struct ip6_tnl_txopts **txopts)
+{
+    char segs[1024];
+    int seg_count = 0;
+    char *s = segs;
+    int i;
+    int srhlen;
+    struct ipv6_sr_hdr *hdr;
+    struct ip6_tnl_txopts *opts = *txopts;
+
+    if (!argv || !*argv)
+        return -1;
+
+    strncpy(segs, argv, 1023);
+    segs[1023] = 0;
+
+    for (i = 0; *s; *s++ == ',' ? i++ : *s);
+    seg_count = i+1;
+
+    srhlen = 8 + 16*(seg_count+1); /* header + segments + dummy last hop */
+    opts = realloc(opts, opts->tot_len + srhlen);
+    opts->srcrt_offset = opts->tot_len - sizeof(*opts);
+    opts->tot_len += srhlen;
+    opts->opt_nflen += srhlen;
+
+    hdr = (struct ipv6_sr_hdr *)((void *)opts + sizeof(*opts) + opts->srcrt_offset);
+
+    hdr->nexthdr = 0;
+    hdr->hdrlen = (seg_count+1) << 1;
+    hdr->type = 4;
+    hdr->segments_left = seg_count;
+    hdr->first_segment = seg_count;
+    hdr->flag_1 = 0;
+    hdr->flag_2 = 0;
+    hdr->hmackeyid = 0;
+
+    i = seg_count;
+    s = strtok(segs, ",");
+    do {
+        inet_pton(AF_INET6, s, &hdr->segments[i]);
+        i--;
+	} while ((s = strtok(NULL, ",")));
+
+    memset(&hdr->segments[0], 0x00, sizeof(struct in6_addr));
+
+    *txopts = opts;
+
+    return 0;
+}
+
 static int ip6tunnel_parse_opt(struct link_util *lu, int argc, char **argv,
 			       struct nlmsghdr *n)
 {
@@ -76,6 +126,7 @@ static int ip6tunnel_parse_opt(struct link_util *lu, int argc, char **argv,
 	__u32 flags = 0;
 	__u32 link = 0;
 	__u8 proto = 0;
+    struct ip6_tnl_txopts *opts = NULL;
 
 	memset(&laddr, 0, sizeof(laddr));
 	memset(&raddr, 0, sizeof(raddr));
@@ -235,6 +286,18 @@ get_failed:
 			if (strcmp(*argv, "inherit") != 0)
 				invarg("not inherit", *argv);
 			flags |= IP6_TNL_F_USE_ORIG_FWMARK;
+        } else if (strcmp(*argv, "srh") == 0) {
+            NEXT_ARG();
+            if (!opts) {
+                opts = calloc(1, sizeof(*opts));
+                opts->tot_len = sizeof(*opts);
+                opts->hopopt_offset = -1;
+                opts->dst0opt_offset = -1;
+                opts->srcrt_offset = -1;
+                opts->dst1opt_offset = -1;
+            }
+            if (parse_srh_opts(*argv, &opts))
+                invarg("invalid segments", *argv);
 		} else
 			usage();
 		argc--, argv++;
@@ -248,6 +311,8 @@ get_failed:
 	addattr32(n, 1024, IFLA_IPTUN_FLOWINFO, flowinfo);
 	addattr32(n, 1024, IFLA_IPTUN_FLAGS, flags);
 	addattr32(n, 1024, IFLA_IPTUN_LINK, link);
+    if (opts)
+        addattr_l(n, 1024, IFLA_IPTUN_EXTHDR, opts, opts->tot_len);
 
 	return 0;
 }
@@ -340,6 +405,28 @@ static void ip6tunnel_print_opt(struct link_util *lu, FILE *f, struct rtattr *tb
 
 	if (flags & IP6_TNL_F_USE_ORIG_FWMARK)
 		fprintf(f, "fwmark inherit ");
+
+    if (tb[IFLA_IPTUN_EXTHDR]) {
+        struct ip6_tnl_txopts *opts;
+
+        opts = RTA_DATA(tb[IFLA_IPTUN_EXTHDR]);
+
+        fprintf(stderr, "opts data: tot_len: %d, opt_nflen: %d\n", opts->tot_len, opts->opt_nflen);
+
+        if (opts->srcrt_offset >= 0) {
+            struct ipv6_sr_hdr *hdr;
+            int i;
+            char ip6[42];
+
+            fprintf(f, "srh ");
+
+            hdr = (void *)opts + sizeof(*opts) + opts->srcrt_offset;
+            for (i = hdr->first_segment; i > 0; i--) {
+                inet_ntop(AF_INET6, &hdr->segments[i], ip6, 41);
+                fprintf(f, "%s%c", ip6, (i == 1) ? ' ' : ',');
+            }
+        }
+    }
 }
 
 static void ip6tunnel_print_help(struct link_util *lu, int argc, char **argv,
