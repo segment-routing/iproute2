@@ -259,6 +259,8 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
 			while (NLMSG_OK(h, msglen)) {
 				int err = 0;
 
+				h->nlmsg_flags &= ~a->nc_flags;
+
 				if (nladdr.nl_pid != 0 ||
 				    h->nlmsg_pid != rth->local.nl_pid ||
 				    h->nlmsg_seq != rth->dump)
@@ -317,20 +319,20 @@ skip_it:
 	}
 }
 
-int rtnl_dump_filter(struct rtnl_handle *rth,
+int rtnl_dump_filter_nc(struct rtnl_handle *rth,
 		     rtnl_filter_t filter,
-		     void *arg1)
+		     void *arg1, __u16 nc_flags)
 {
 	const struct rtnl_dump_filter_arg a[2] = {
-		{ .filter = filter, .arg1 = arg1, },
-		{ .filter = NULL,   .arg1 = NULL, },
+		{ .filter = filter, .arg1 = arg1, .nc_flags = nc_flags, },
+		{ .filter = NULL,   .arg1 = NULL, .nc_flags = 0, },
 	};
 
 	return rtnl_dump_filter_l(rth, a);
 }
 
 int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n,
-	      struct nlmsghdr *answer, size_t len)
+	      struct nlmsghdr *answer, size_t maxlen)
 {
 	int status;
 	unsigned seq;
@@ -413,7 +415,7 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n,
 				} else if (!err->error) {
 					if (answer)
 						memcpy(answer, h,
-						       MIN(len, h->nlmsg_len));
+						       MIN(maxlen, h->nlmsg_len));
 					return 0;
 				}
 
@@ -425,7 +427,7 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n,
 
 			if (answer) {
 				memcpy(answer, h,
-				       MIN(len, h->nlmsg_len));
+				       MIN(maxlen, h->nlmsg_len));
 				return 0;
 			}
 
