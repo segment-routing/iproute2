@@ -60,6 +60,8 @@ static int parse_srh_opts(const char *argv, struct ip6_tnl_txopts **txopts)
     char segs[1024];
     int seg_count = 0;
     char *s = segs;
+    char *hmacstr;
+    int hmackeyid = 0;
     int i;
     int srhlen;
     struct ipv6_sr_hdr *hdr;
@@ -71,10 +73,16 @@ static int parse_srh_opts(const char *argv, struct ip6_tnl_txopts **txopts)
     strncpy(segs, argv, 1023);
     segs[1023] = 0;
 
+    hmacstr = strchr(segs, '/');
+    if (hmacstr) {
+        *hmacstr++ = 0;
+        hmackeyid = atoi(hmacstr);
+    }
+
     for (i = 0; *s; *s++ == ',' ? i++ : *s);
     seg_count = i+1;
 
-    srhlen = 8 + 16*(seg_count+1); /* header + segments + dummy last hop */
+    srhlen = 8 + 16*(seg_count+1) + (hmackeyid ? 32 : 0); /* header + segments + dummy last hop + hmac */
     opts = realloc(opts, opts->tot_len + srhlen);
     opts->srcrt_offset = opts->tot_len - sizeof(*opts);
     opts->tot_len += srhlen;
@@ -83,13 +91,13 @@ static int parse_srh_opts(const char *argv, struct ip6_tnl_txopts **txopts)
     hdr = (struct ipv6_sr_hdr *)((void *)opts + sizeof(*opts) + opts->srcrt_offset);
 
     hdr->nexthdr = 0;
-    hdr->hdrlen = (seg_count+1) << 1;
+    hdr->hdrlen = (srhlen - 8) >> 3;
     hdr->type = 4;
     hdr->segments_left = seg_count;
     hdr->first_segment = seg_count;
     hdr->flag_1 = 0;
     hdr->flag_2 = 0;
-    hdr->hmackeyid = 0;
+    hdr->hmackeyid = hmackeyid;
 
     i = seg_count;
     s = strtok(segs, ",");
