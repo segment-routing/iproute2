@@ -186,8 +186,6 @@ int do_ipmonitor(int argc, char **argv)
 			file = *argv;
 		} else if (matches(*argv, "label") == 0) {
 			prefix_banner = 1;
-		} else if (matches(*argv, "all-nsid") == 0) {
-			listen_all_nsid = 1;
 		} else if (matches(*argv, "link") == 0) {
 			llink=1;
 			groups = 0;
@@ -217,6 +215,8 @@ int do_ipmonitor(int argc, char **argv)
 			groups = 0;
 		} else if (strcmp(*argv, "all") == 0) {
 			prefix_banner=1;
+		} else if (matches(*argv, "all-nsid") == 0) {
+			listen_all_nsid = 1;
 		} else if (matches(*argv, "help") == 0) {
 			usage();
 		} else if (strcmp(*argv, "dev") == 0) {
@@ -284,12 +284,16 @@ int do_ipmonitor(int argc, char **argv)
 	}
 	if (file) {
 		FILE *fp;
+		int err;
+
 		fp = fopen(file, "r");
 		if (fp == NULL) {
 			perror("Cannot fopen");
 			exit(-1);
 		}
-		return rtnl_from_file(fp, accept_msg, stdout);
+		err = rtnl_from_file(fp, accept_msg, stdout);
+		fclose(fp);
+		return err;
 	}
 
 	if (rtnl_open(&rth, groups) < 0)

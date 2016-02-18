@@ -86,7 +86,7 @@ static void usage(void)
 	fprintf(stderr, "           [ ssthresh NUMBER ] [ realms REALM ] [ src ADDRESS ]\n");
 	fprintf(stderr, "           [ rto_min TIME ] [ hoplimit NUMBER ] [ initrwnd NUMBER ]\n");
 	fprintf(stderr, "           [ features FEATURES ] [ quickack BOOL ] [ congctl NAME ]\n");
-	fprintf(stderr, "           [ pref PREF ]\n");
+	fprintf(stderr, "           [ pref PREF ] [ expires TIME ]\n");
 	fprintf(stderr, "TYPE := [ unicast | local | broadcast | multicast | throw |\n");
 	fprintf(stderr, "          unreachable | prohibit | blackhole | nat ]\n");
 	fprintf(stderr, "TABLE_ID := [ local | main | default | all | NUMBER ]\n");
@@ -572,7 +572,7 @@ int print_route(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
 			mxlock = *(unsigned*)RTA_DATA(mxrta[RTAX_LOCK]);
 
 		for (i=2; i<= RTAX_MAX; i++) {
-			__u32 val;
+			__u32 val = 0U;
 
 			if (mxrta[i] == NULL)
 				continue;
@@ -646,7 +646,13 @@ int print_route(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
 					lwt_print_encap(fp,
 							tb[RTA_ENCAP_TYPE],
 							tb[RTA_ENCAP]);
-
+				if (tb[RTA_NEWDST]) {
+					fprintf(fp, " as to %s ",
+						format_host(r->rtm_family,
+						RTA_PAYLOAD(tb[RTA_NEWDST]),
+						RTA_DATA(tb[RTA_NEWDST]),
+						abuf, sizeof(abuf)));
+				}
 				if (tb[RTA_GATEWAY]) {
 					fprintf(fp, " via %s ",
 						format_host(r->rtm_family,
@@ -681,7 +687,9 @@ int print_route(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
 					fprintf(fp, "(ttl>%d)", nh->rtnh_hops);
 			} else {
 				fprintf(fp, " dev %s", ll_index_to_name(nh->rtnh_ifindex));
-				fprintf(fp, " weight %d", nh->rtnh_hops+1);
+				if (r->rtm_family != AF_MPLS)
+					fprintf(fp, " weight %d",
+						nh->rtnh_hops+1);
 			}
 			if (nh->rtnh_flags & RTNH_F_DEAD)
 				fprintf(fp, " dead");
@@ -743,7 +751,7 @@ static int parse_one_nh(struct nlmsghdr *n, struct rtmsg *r,
 				rtnh->rtnh_len += sizeof(struct rtattr) + addr.bytelen;
 			} else {
 				rta_addattr_l(rta, 4096, RTA_VIA, &addr.family, addr.bytelen+2);
-				rtnh->rtnh_len += sizeof(struct rtattr) + addr.bytelen+2;
+				rtnh->rtnh_len += RTA_SPACE(addr.bytelen+2);
 			}
 		} else if (strcmp(*argv, "dev") == 0) {
 			NEXT_ARG();
@@ -771,6 +779,16 @@ static int parse_one_nh(struct nlmsghdr *n, struct rtmsg *r,
 
 			lwt_parse_encap(rta, 4096, &argc, &argv);
 			rtnh->rtnh_len += rta->rta_len - len;
+		} else if (strcmp(*argv, "as") == 0) {
+			inet_prefix addr;
+
+			NEXT_ARG();
+			if (strcmp(*argv, "to") == 0)
+				NEXT_ARG();
+			get_addr(&addr, *argv, r->rtm_family);
+			rta_addattr_l(rta, 4096, RTA_NEWDST, &addr.data,
+				      addr.bytelen);
+			rtnh->rtnh_len += sizeof(struct rtattr) + addr.bytelen;
 		} else
 			break;
 	}
@@ -829,6 +847,7 @@ static int iproute_modify(int cmd, unsigned flags, int argc, char **argv)
 	int table_ok = 0;
 	int raw = 0;
 	int type_ok = 0;
+	static int hz;
 
 	memset(&req, 0, sizeof(req));
 
@@ -880,9 +899,11 @@ static int iproute_modify(int cmd, unsigned flags, int argc, char **argv)
 			if (req.r.rtm_family == AF_UNSPEC)
 				req.r.rtm_family = addr.family;
 			if (addr.family == req.r.rtm_family)
-				addattr_l(&req.n, sizeof(req), RTA_GATEWAY, &addr.data, addr.bytelen);
+				addattr_l(&req.n, sizeof(req), RTA_GATEWAY,
+					  &addr.data, addr.bytelen);
 			else
-				addattr_l(&req.n, sizeof(req), RTA_VIA, &addr.family, addr.bytelen+2);
+				addattr_l(&req.n, sizeof(req), RTA_VIA,
+					  &addr.family, addr.bytelen+2);
 		} else if (strcmp(*argv, "from") == 0) {
 			inet_prefix addr;
 			NEXT_ARG();
@@ -899,6 +920,14 @@ static int iproute_modify(int cmd, unsigned flags, int argc, char **argv)
 			if (rtnl_dsfield_a2n(&tos, *argv))
 				invarg("\"tos\" value is invalid\n", *argv);
 			req.r.rtm_tos = tos;
+		} else if (strcmp(*argv, "expires") == 0 ) {
+			__u32 expires;
+			NEXT_ARG();
+			if (get_u32(&expires, *argv, 0))
+				invarg("\"expires\" value is invalid\n", *argv);
+			if (!hz)
+				hz = get_user_hz();
+			addattr32(&req.n, sizeof(req), RTA_EXPIRES, expires*hz);
 		} else if (matches(*argv, "metric") == 0 ||
 			   matches(*argv, "priority") == 0 ||
 			   strcmp(*argv, "preference") == 0) {

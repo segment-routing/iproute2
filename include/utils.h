@@ -40,6 +40,10 @@ extern bool do_all;
 #define IPSEC_PROTO_ANY	255
 #endif
 
+#ifndef CONFDIR
+#define CONFDIR		"/etc/iproute2"
+#endif
+
 #define SPRINT_BSIZE 64
 #define SPRINT_BUF(x)	char x[SPRINT_BSIZE]
 
@@ -171,6 +175,24 @@ static inline __u32 nl_mgrp(__u32 group)
 	return group ? (1 << (group - 1)) : 0;
 }
 
+/* courtesy of bridge-utils */
+static inline unsigned long __tv_to_jiffies(const struct timeval *tv)
+{
+	unsigned long long jif;
+
+	jif = 1000000ULL * tv->tv_sec + tv->tv_usec;
+
+	return jif/10000;
+}
+
+static inline void __jiffies_to_tv(struct timeval *tv, unsigned long jiffies)
+{
+	unsigned long long tvusec;
+
+	tvusec = 10000ULL*jiffies;
+	tv->tv_sec = tvusec/1000000;
+	tv->tv_usec = tvusec - 1000000 * tv->tv_sec;
+}
 
 int print_timestamp(FILE *fp);
 void print_nlmsg_timestamp(FILE *fp, const struct nlmsghdr *n);
@@ -195,6 +217,9 @@ void print_nlmsg_timestamp(FILE *fp, const struct nlmsghdr *n);
 # define __check_format_string(pos_str, pos_args) \
 	__attribute__ ((format (printf, (pos_str), (pos_args))))
 #endif
+
+#define _textify(x)	#x
+#define textify(x)	_textify(x)
 
 #define htonll(x) ((1==htonl(1)) ? (x) : ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32) | htonl((x) >> 32))
 #define ntohll(x) ((1==ntohl(1)) ? (x) : ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32) | ntohl((x) >> 32))
