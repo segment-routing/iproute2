@@ -25,6 +25,9 @@
 #include "utils.h"
 #include "iproute_lwtunnel.h"
 
+#include <linux/seg6.h>
+#include <linux/seg6_iptunnel.h>
+
 static int read_encap_type(const char *name)
 {
 	if (strcmp(name, "mpls") == 0)
@@ -35,6 +38,8 @@ static int read_encap_type(const char *name)
 		return LWTUNNEL_ENCAP_IP6;
 	else if (strcmp(name, "ila") == 0)
 		return LWTUNNEL_ENCAP_ILA;
+    else if (strcmp(name, "seg6") == 0)
+        return LWTUNNEL_ENCAP_SEG6;
 	else
 		return LWTUNNEL_ENCAP_NONE;
 }
@@ -50,6 +55,8 @@ static const char *format_encap_type(int type)
 		return "ip6";
 	case LWTUNNEL_ENCAP_ILA:
 		return "ila";
+    case LWTUNNEL_ENCAP_SEG6:
+        return "seg6";
 	default:
 		return "unknown";
 	}
@@ -64,6 +71,38 @@ static void print_encap_mpls(FILE *fp, struct rtattr *encap)
 	if (tb[MPLS_IPTUNNEL_DST])
 		fprintf(fp, " %s ",
 		        format_host_rta(AF_MPLS, tb[MPLS_IPTUNNEL_DST]));
+}
+
+static void print_encap_seg6(FILE *fp, struct rtattr *encap)
+{
+    struct rtattr *tb[SEG6_IPTUNNEL_MAX+1];
+    char abuf[256];
+    struct seg6_iptunnel_encap *tuninfo;
+    struct ipv6_sr_hdr *srh;
+    int i;
+
+    parse_rtattr_nested(tb, SEG6_IPTUNNEL_MAX, encap);
+
+    if (!tb[SEG6_IPTUNNEL_SRH])
+        return;
+
+    tuninfo = RTA_DATA(tb[SEG6_IPTUNNEL_SRH]);
+    fprintf(fp, "mode %s ", (tuninfo->flags & SEG6_IPTUN_FLAG_ENCAP) ? "encap" : "inline");
+
+    srh = tuninfo->srh;
+
+    fprintf(fp, "segs %d [ ", srh->first_segment + 1);
+
+    for (i = srh->first_segment; i >= 0; i--)
+        fprintf(fp, "%s ", rt_addr_n2a(AF_INET6, 16, &srh->segments[i], abuf, sizeof(abuf)));
+
+    fprintf(fp, "] ");
+
+    if (sr_get_flags(srh) & SR6_FLAG_CLEANUP)
+        fprintf(fp, "cleanup ");
+
+    if (srh->hmackeyid)
+        fprintf(fp, "hmac 0x%X ", srh->hmackeyid);
 }
 
 static void print_encap_ip(FILE *fp, struct rtattr *encap)
@@ -184,6 +223,8 @@ void lwt_print_encap(FILE *fp, struct rtattr *encap_type,
 	case LWTUNNEL_ENCAP_IP6:
 		print_encap_ip6(fp, encap);
 		break;
+    case LWTUNNEL_ENCAP_SEG6:
+        print_encap_seg6(fp, encap);
 	}
 }
 
@@ -365,6 +406,102 @@ static int parse_encap_ip6(struct rtattr *rta, size_t len, int *argcp, char ***a
 	return 0;
 }
 
+static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***argvp)
+{
+    char **argv = *argvp;
+    int argc = *argcp;
+    struct seg6_iptunnel_encap *tuninfo;
+    int nsegs = 0;
+    int encap = -1;
+    __u8 hmac = 0;
+    __u8 cleanup = 0;
+    int mode_ok = 0, segs_ok = 0, cleanup_ok = 0, hmac_ok = 0;
+    int srhlen;
+    char segbuf[1024];
+    int i;
+    char *s;
+    struct ipv6_sr_hdr *srh;
+
+    while (argc > 0) {
+        if (strcmp(*argv, "mode") == 0) {
+            NEXT_ARG();
+            if (mode_ok++)
+                duparg2("mode", *argv);
+            if (strcmp(*argv, "encap") == 0)
+                encap = 1;
+            else if (strcmp(*argv, "inline") == 0)
+                encap = 0;
+            else
+                invarg("\"mode\" value is invalid\n", *argv);
+        } else if (strcmp(*argv, "segs") == 0) {
+            NEXT_ARG();
+            if (segs_ok++)
+                duparg2("segs", *argv);
+            if (encap == -1)
+                invarg("\"segs\" provided before \"mode\"\n", *argv);
+
+            strncpy(segbuf, *argv, 1024);
+            segbuf[1023] = 0;
+        } else if (strcmp(*argv, "cleanup") == 0) {
+            if (cleanup_ok++)
+                duparg2("cleanup", *argv);
+            cleanup = 1;
+        } else if (strcmp(*argv, "hmac") == 0) {
+            NEXT_ARG();
+            if (hmac_ok++)
+                duparg2("hmac", *argv);
+            get_u8(&hmac, *argv, 0);
+        } else {
+            break;
+        }
+        argc--; argv++;
+    }
+
+    s = segbuf;
+    for (i = 0; *s; *s++ == ',' ? i++ : *s);
+    nsegs = i + 1;
+
+    if (!encap)
+        nsegs++;
+
+    srhlen = 8 + 16*nsegs;
+
+    if (hmac)
+        srhlen += 32;
+
+    tuninfo = malloc(sizeof(*tuninfo) + srhlen);
+    memset(tuninfo, 0, sizeof(*tuninfo) + srhlen);
+
+    if (encap)
+        tuninfo->flags = SEG6_IPTUN_FLAG_ENCAP;
+
+    srh = tuninfo->srh;
+    srh->hdrlen = (srhlen >> 3) - 1;
+    srh->type = 4;
+    srh->segments_left = nsegs - 1;
+    srh->first_segment = nsegs - 1;
+
+    if (cleanup)
+        sr_set_flags(srh, SR6_FLAG_CLEANUP);
+
+    i = srh->first_segment;
+    for (s = strtok(segbuf, ","); s; s = strtok(NULL, ",")) {
+        inet_get_addr(s, NULL, &srh->segments[i]);
+        i--;
+    }
+
+    if (hmac)
+        sr_set_hmac_key_id(srh, hmac);
+
+    rta_addattr_l(rta, len, SEG6_IPTUNNEL_SRH, tuninfo, sizeof(*tuninfo) + srhlen);
+    free(tuninfo);
+
+    *argcp = argc + 1;
+    *argvp = argv - 1;
+
+    return 0;
+}
+
 int lwt_parse_encap(struct rtattr *rta, size_t len, int *argcp, char ***argvp)
 {
 	struct rtattr *nest;
@@ -397,6 +534,9 @@ int lwt_parse_encap(struct rtattr *rta, size_t len, int *argcp, char ***argvp)
 	case LWTUNNEL_ENCAP_IP6:
 		parse_encap_ip6(rta, len, &argc, &argv);
 		break;
+    case LWTUNNEL_ENCAP_SEG6:
+        parse_encap_seg6(rta, len, &argc, &argv);
+        break;
 	default:
 		fprintf(stderr, "Error: unsupported encap type\n");
 		break;
