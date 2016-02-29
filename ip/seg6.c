@@ -116,7 +116,7 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
     case SEG6_CMD_DUMPHMAC:
     {
         char secret[64];
-        __u32 slen = rta_getattr_u32(attrs[SEG6_ATTR_SECRETLEN]);
+        __u8 slen = rta_getattr_u8(attrs[SEG6_ATTR_SECRETLEN]);
 
         memset(secret, 0, 64);
 
