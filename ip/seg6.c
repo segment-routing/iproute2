@@ -22,6 +22,7 @@
 
 #include <linux/genetlink.h>
 #include <linux/seg6_genl.h>
+#include <linux/seg6_hmac.h>
 
 #include "utils.h"
 #include "ip_common.h"
@@ -31,13 +32,14 @@ static void usage(void)
 {
     fprintf(stderr, "Usage: ip sr/seg6 { COMMAND | help }\n");
     fprintf(stderr, "       ip sr hmac show\n");
-    fprintf(stderr, "       ip sr hmac set KEYID\n");
+    fprintf(stderr, "       ip sr hmac set KEYID ALGO\n");
     fprintf(stderr, "       ip sr action { show | flush }\n");
     fprintf(stderr, "       ip sr action add ADDRESS type TYPE [args]\n");
     fprintf(stderr, "       ip sr action del ADDRESS\n");
     fprintf(stderr, "       ip sr tunsrc show\n");
     fprintf(stderr, "       ip sr tunsrc set ADDRESS\n");
     fprintf(stderr, "where  TYPE := { override_next ADDRESS | nexthop ADDRESS }\n");
+    fprintf(stderr, "       ALGO := { sha1 | sha256 }\n");
     exit(-1);
 }
 
@@ -51,12 +53,13 @@ static int genl_family = -1;
 static struct {
     int cmd;
     struct in6_addr addr;
-    __u8 keyid;
+    __u32 keyid;
     char *pass;
     int bind_op;
     struct in6_addr bind_data;
     int bind_datalen;
     int bind_flags;
+    __u8 alg_id;
 } opts;
 
 static const char *op_to_str(int op)
@@ -116,7 +119,9 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
     case SEG6_CMD_DUMPHMAC:
     {
         char secret[64];
+        char *algstr;
         __u8 slen = rta_getattr_u8(attrs[SEG6_ATTR_SECRETLEN]);
+        __u8 alg_id = rta_getattr_u8(attrs[SEG6_ATTR_ALGID]);
 
         memset(secret, 0, 64);
 
@@ -126,8 +131,19 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
         }
         memcpy(secret, RTA_DATA(attrs[SEG6_ATTR_SECRET]), slen);
 
-        fprintf(fp, "hmac 0x%x ", rta_getattr_u8(attrs[SEG6_ATTR_HMACKEYID]));
-        fprintf(fp, "algo %d ", rta_getattr_u8(attrs[SEG6_ATTR_ALGID]));
+        switch (alg_id) {
+        case SEG6_HMAC_ALGO_SHA1:
+            algstr = "sha1";
+            break;
+        case SEG6_HMAC_ALGO_SHA256:
+            algstr = "sha256";
+            break;
+        default:
+            algstr = "<unknown>";
+        }
+
+        fprintf(fp, "hmac %u ", rta_getattr_u32(attrs[SEG6_ATTR_HMACKEYID]));
+        fprintf(fp, "algo %s ", algstr);
         fprintf(fp, "secret \"%s\" ", secret);
 
         fprintf(fp, "\n");
@@ -162,9 +178,9 @@ static int seg6_do_cmd(void)
     switch (opts.cmd) {
     case SEG6_CMD_SETHMAC:
     {
-        addattr8(&req.n, sizeof(req), SEG6_ATTR_HMACKEYID, opts.keyid);
+        addattr32(&req.n, sizeof(req), SEG6_ATTR_HMACKEYID, opts.keyid);
         addattr8(&req.n, sizeof(req), SEG6_ATTR_SECRETLEN, strlen(opts.pass));
-        addattr8(&req.n, sizeof(req), SEG6_ATTR_ALGID, 1);
+        addattr8(&req.n, sizeof(req), SEG6_ATTR_ALGID, opts.alg_id);
         if (strlen(opts.pass))
             addattr_l(&req.n, sizeof(req), SEG6_ATTR_SECRET, opts.pass, strlen(opts.pass));
         break;
@@ -231,8 +247,16 @@ int do_seg6(int argc, char **argv)
             opts.cmd = SEG6_CMD_DUMPHMAC;
         } else if (matches(*argv, "set") == 0) {
             NEXT_ARG();
-            if (get_u8(&opts.keyid, *argv, 0) || opts.keyid == 0)
+            if (get_u32(&opts.keyid, *argv, 0) || opts.keyid == 0)
                 invarg("hmac KEYID value is invalid", *argv);
+            NEXT_ARG();
+            if (strcmp(*argv, "sha1") == 0) {
+                opts.alg_id = SEG6_HMAC_ALGO_SHA1;
+            } else if (strcmp(*argv, "sha256") == 0) {
+                opts.alg_id = SEG6_HMAC_ALGO_SHA256;
+            } else {
+                invarg("hmac ALGO value is invalid", *argv);
+            }
             opts.cmd = SEG6_CMD_SETHMAC;
             opts.pass = getpass("Enter secret for HMAC key ID (blank to delete): ");
         } else {

@@ -27,6 +27,7 @@
 
 #include <linux/seg6.h>
 #include <linux/seg6_iptunnel.h>
+#include <linux/seg6_hmac.h>
 
 static int read_encap_type(const char *name)
 {
@@ -101,8 +102,10 @@ static void print_encap_seg6(FILE *fp, struct rtattr *encap)
     if (sr_get_flags(srh) & SR6_FLAG_CLEANUP)
         fprintf(fp, "cleanup ");
 
-    if (srh->hmackeyid)
-        fprintf(fp, "hmac 0x%X ", srh->hmackeyid);
+    if (sr_get_flags(srh) & SR6_FLAG_HMAC) {
+        struct sr6_tlv_hmac *tlv = (struct sr6_tlv_hmac *)((char *)srh + ((srh->hdrlen + 1) << 3) - 40);
+        fprintf(fp, "hmac 0x%X ", __be32_to_cpu(tlv->hmackeyid));
+    }
 }
 
 static void print_encap_ip(FILE *fp, struct rtattr *encap)
@@ -413,8 +416,9 @@ static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***
     struct seg6_iptunnel_encap *tuninfo;
     int nsegs = 0;
     int encap = -1;
-    __u8 hmac = 0;
+    __u32 hmac = 0;
     __u8 cleanup = 0;
+    __u16 flags = 0;
     int mode_ok = 0, segs_ok = 0, cleanup_ok = 0, hmac_ok = 0;
     int srhlen;
     char segbuf[1024];
@@ -450,7 +454,7 @@ static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***
             NEXT_ARG();
             if (hmac_ok++)
                 duparg2("hmac", *argv);
-            get_u8(&hmac, *argv, 0);
+            get_u32(&hmac, *argv, 0);
         } else {
             break;
         }
@@ -467,7 +471,7 @@ static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***
     srhlen = 8 + 16*nsegs;
 
     if (hmac)
-        srhlen += 32;
+        srhlen += 40;
 
     tuninfo = malloc(sizeof(*tuninfo) + srhlen);
     memset(tuninfo, 0, sizeof(*tuninfo) + srhlen);
@@ -482,7 +486,11 @@ static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***
     srh->first_segment = nsegs - 1;
 
     if (cleanup)
-        sr_set_flags(srh, SR6_FLAG_CLEANUP);
+        flags |= SR6_FLAG_CLEANUP;
+    if (hmac)
+        flags |= SR6_FLAG_HMAC;
+
+    srh->flags = __cpu_to_be16(flags);
 
     i = srh->first_segment;
     for (s = strtok(segbuf, ","); s; s = strtok(NULL, ",")) {
@@ -490,8 +498,12 @@ static int parse_encap_seg6(struct rtattr *rta, size_t len, int *argcp, char ***
         i--;
     }
 
-    if (hmac)
-        sr_set_hmac_key_id(srh, hmac);
+    if (hmac) {
+        struct sr6_tlv_hmac *tlv = (struct sr6_tlv_hmac *)((char *)srh + srhlen - 40);
+        tlv->type = SR6_TLV_HMAC;
+        tlv->len = 38;
+        tlv->hmackeyid = __cpu_to_be32(hmac);
+    }
 
     rta_addattr_l(rta, len, SEG6_IPTUNNEL_SRH, tuninfo, sizeof(*tuninfo) + srhlen);
     free(tuninfo);
