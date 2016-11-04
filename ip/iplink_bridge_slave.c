@@ -24,7 +24,7 @@ static void print_explain(FILE *f)
 	fprintf(f,
 		"Usage: ... bridge_slave [ state STATE ] [ priority PRIO ] [cost COST ]\n"
 		"                        [ guard {on | off} ]\n"
-		"                        [ hairpin {on | off} ] \n"
+		"                        [ hairpin {on | off} ]\n"
 		"                        [ fastleave {on | off} ]\n"
 		"                        [ root_block {on | off} ]\n"
 		"                        [ learning {on | off} ]\n"
@@ -33,6 +33,7 @@ static void print_explain(FILE *f)
 		"                        [ proxy_arp_wifi {on | off} ]\n"
 		"                        [ mcast_router MULTICAST_ROUTER ]\n"
 		"                        [ mcast_fast_leave {on | off} ]\n"
+		"                        [ mcast_flood {on | off} ]\n"
 	);
 }
 
@@ -187,6 +188,10 @@ static void bridge_slave_print_opt(struct link_util *lu, FILE *f,
 	if (tb[IFLA_BRPORT_FAST_LEAVE])
 		print_onoff(f, "mcast_fast_leave",
 			    rta_getattr_u8(tb[IFLA_BRPORT_FAST_LEAVE]));
+
+	if (tb[IFLA_BRPORT_MCAST_FLOOD])
+		print_onoff(f, "mcast_flood",
+			rta_getattr_u8(tb[IFLA_BRPORT_MCAST_FLOOD]));
 }
 
 static void bridge_slave_parse_on_off(char *arg_name, char *arg_val,
@@ -251,6 +256,10 @@ static int bridge_slave_parse_opt(struct link_util *lu, int argc, char **argv,
 			NEXT_ARG();
 			bridge_slave_parse_on_off("flood", *argv, n,
 						  IFLA_BRPORT_UNICAST_FLOOD);
+		} else if (matches(*argv, "mcast_flood") == 0) {
+			NEXT_ARG();
+			bridge_slave_parse_on_off("mcast_flood", *argv, n,
+						  IFLA_BRPORT_MCAST_FLOOD);
 		} else if (matches(*argv, "proxy_arp") == 0) {
 			NEXT_ARG();
 			bridge_slave_parse_on_off("proxy_arp", *argv, n,
@@ -293,10 +302,9 @@ static void bridge_slave_print_help(struct link_util *lu, int argc, char **argv,
 }
 
 struct link_util bridge_slave_link_util = {
-	.id		= "bridge",
+	.id		= "bridge_slave",
 	.maxattr	= IFLA_BRPORT_MAX,
 	.print_opt	= bridge_slave_print_opt,
 	.parse_opt	= bridge_slave_parse_opt,
 	.print_help     = bridge_slave_print_help,
-	.slave		= true,
 };

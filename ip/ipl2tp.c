@@ -56,6 +56,8 @@ struct l2tp_parm {
 
 	uint16_t pw_type;
 	uint16_t mtu;
+	int udp6_csum_tx:1;
+	int udp6_csum_rx:1;
 	int udp_csum:1;
 	int recv_seq:1;
 	int send_seq:1;
@@ -117,6 +119,12 @@ static int create_tunnel(struct l2tp_parm *p)
 	if (p->encap == L2TP_ENCAPTYPE_UDP) {
 		addattr16(&req.n, 1024, L2TP_ATTR_UDP_SPORT, p->local_udp_port);
 		addattr16(&req.n, 1024, L2TP_ATTR_UDP_DPORT, p->peer_udp_port);
+		if (p->udp_csum)
+			addattr(&req.n, 1024, L2TP_ATTR_UDP_CSUM);
+		if (!p->udp6_csum_tx)
+			addattr(&req.n, 1024, L2TP_ATTR_UDP_ZERO_CSUM6_TX);
+		if (!p->udp6_csum_rx)
+			addattr(&req.n, 1024, L2TP_ATTR_UDP_ZERO_CSUM6_RX);
 	}
 
 	if (rtnl_talk(&genl_rth, &req.n, NULL, 0) < 0)
@@ -282,6 +290,12 @@ static int get_response(struct nlmsghdr *n, void *arg)
 		p->l2spec_len = rta_getattr_u8(attrs[L2TP_ATTR_L2SPEC_LEN]);
 
 	p->udp_csum = !!attrs[L2TP_ATTR_UDP_CSUM];
+	/*
+	 * Not fetching from L2TP_ATTR_UDP_ZERO_CSUM6_{T,R}X because the
+	 * kernel doesn't send it so just leave it as default value.
+	 */
+	p->udp6_csum_tx = 1;
+	p->udp6_csum_rx = 1;
 	if (attrs[L2TP_ATTR_COOKIE])
 		memcpy(p->cookie, RTA_DATA(attrs[L2TP_ATTR_COOKIE]),
 		       p->cookie_len = RTA_PAYLOAD(attrs[L2TP_ATTR_COOKIE]));
@@ -425,30 +439,19 @@ static int get_tunnel(struct l2tp_data *p)
  * Command parser
  *****************************************************************************/
 
-static int hex(char ch)
-{
-	if ((ch >= 'a') && (ch <= 'f'))
-		return ch - 'a' + 10;
-	if ((ch >= '0') && (ch <= '9'))
-		return ch - '0';
-	if ((ch >= 'A') && (ch <= 'F'))
-		return ch - 'A' + 10;
-	return -1;
-}
-
 static int hex2mem(const char *buf, uint8_t *mem, int count)
 {
 	int i, j;
 	int c;
 
 	for (i = 0, j = 0; i < count; i++, j += 2) {
-		c = hex(buf[j]);
+		c = get_hex(buf[j]);
 		if (c < 0)
 			goto err;
 
 		mem[i] = c << 4;
 
-		c = hex(buf[j + 1]);
+		c = get_hex(buf[j + 1]);
 		if (c < 0)
 			goto err;
 
@@ -470,6 +473,9 @@ static void usage(void)
 	fprintf(stderr, "          tunnel_id ID peer_tunnel_id ID\n");
 	fprintf(stderr, "          [ encap { ip | udp } ]\n");
 	fprintf(stderr, "          [ udp_sport PORT ] [ udp_dport PORT ]\n");
+	fprintf(stderr, "          [ udp_csum { on | off } ]\n");
+	fprintf(stderr, "          [ udp6_csum_tx { on | off } ]\n");
+	fprintf(stderr, "          [ udp6_csum_rx { on | off } ]\n");
 	fprintf(stderr, "Usage: ip l2tp add session [ name NAME ]\n");
 	fprintf(stderr, "          tunnel_id ID\n");
 	fprintf(stderr, "          session_id ID peer_session_id ID\n");
@@ -500,6 +506,8 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 	/* Defaults */
 	p->l2spec_type = L2TP_L2SPECTYPE_DEFAULT;
 	p->l2spec_len = 4;
+	p->udp6_csum_rx = 1;
+	p->udp6_csum_tx = 1;
 
 	while (argc > 0) {
 		if (strcmp(*argv, "encap") == 0) {
@@ -526,6 +534,7 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 		} else if ((strcmp(*argv, "tunnel_id") == 0) ||
 			   (strcmp(*argv, "tid") == 0)) {
 			__u32 uval;
+
 			NEXT_ARG();
 			if (get_u32(&uval, *argv, 0))
 				invarg("invalid ID\n", *argv);
@@ -533,6 +542,7 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 		} else if ((strcmp(*argv, "peer_tunnel_id") == 0) ||
 			   (strcmp(*argv, "ptid") == 0)) {
 			__u32 uval;
+
 			NEXT_ARG();
 			if (get_u32(&uval, *argv, 0))
 				invarg("invalid ID\n", *argv);
@@ -540,6 +550,7 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 		} else if ((strcmp(*argv, "session_id") == 0) ||
 			   (strcmp(*argv, "sid") == 0)) {
 			__u32 uval;
+
 			NEXT_ARG();
 			if (get_u32(&uval, *argv, 0))
 				invarg("invalid ID\n", *argv);
@@ -547,36 +558,68 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 		} else if ((strcmp(*argv, "peer_session_id") == 0) ||
 			   (strcmp(*argv, "psid") == 0)) {
 			__u32 uval;
+
 			NEXT_ARG();
 			if (get_u32(&uval, *argv, 0))
 				invarg("invalid ID\n", *argv);
 			p->peer_session_id = uval;
 		} else if (strcmp(*argv, "udp_sport") == 0) {
 			__u16 uval;
+
 			NEXT_ARG();
 			if (get_u16(&uval, *argv, 0))
 				invarg("invalid port\n", *argv);
 			p->local_udp_port = uval;
 		} else if (strcmp(*argv, "udp_dport") == 0) {
 			__u16 uval;
+
 			NEXT_ARG();
 			if (get_u16(&uval, *argv, 0))
 				invarg("invalid port\n", *argv);
 			p->peer_udp_port = uval;
+		} else if (strcmp(*argv, "udp_csum") == 0) {
+			NEXT_ARG();
+			if (strcmp(*argv, "on") == 0)
+				p->udp_csum = 1;
+			else if (strcmp(*argv, "off") == 0)
+				p->udp_csum = 0;
+			else
+				invarg("invalid option for udp_csum\n", *argv);
+		} else if (strcmp(*argv, "udp6_csum_rx") == 0) {
+			NEXT_ARG();
+			if (strcmp(*argv, "on") == 0)
+				p->udp6_csum_rx = 1;
+			else if (strcmp(*argv, "off") == 0)
+				p->udp6_csum_rx = 0;
+			else
+				invarg("invalid option for udp6_csum_rx\n"
+						, *argv);
+		} else if (strcmp(*argv, "udp6_csum_tx") == 0) {
+			NEXT_ARG();
+			if (strcmp(*argv, "on") == 0)
+				p->udp6_csum_tx = 1;
+			else if (strcmp(*argv, "off") == 0)
+				p->udp6_csum_tx = 0;
+			else
+				invarg("invalid option for udp6_csum_tx\n"
+						, *argv);
 		} else if (strcmp(*argv, "offset") == 0) {
 			__u8 uval;
+
 			NEXT_ARG();
 			if (get_u8(&uval, *argv, 0))
 				invarg("invalid offset\n", *argv);
 			p->offset = uval;
 		} else if (strcmp(*argv, "peer_offset") == 0) {
 			__u8 uval;
+
 			NEXT_ARG();
 			if (get_u8(&uval, *argv, 0))
 				invarg("invalid offset\n", *argv);
 			p->peer_offset = uval;
 		} else if (strcmp(*argv, "cookie") == 0) {
 			int slen;
+
 			NEXT_ARG();
 			slen = strlen(*argv);
 			if ((slen != 8) && (slen != 16))
@@ -587,6 +630,7 @@ static int parse_args(int argc, char **argv, int cmd, struct l2tp_parm *p)
 				invarg("cookie must be a hex string\n", *argv);
 		} else if (strcmp(*argv, "peer_cookie") == 0) {
 			int slen;
+
 			NEXT_ARG();
 			slen = strlen(*argv);
 			if ((slen != 8) && (slen != 16))
@@ -720,19 +764,11 @@ static int do_show(int argc, char **argv)
 
 int do_ipl2tp(int argc, char **argv)
 {
-	if (genl_family < 0) {
-		if (rtnl_open_byproto(&genl_rth, 0, NETLINK_GENERIC) < 0) {
-			fprintf(stderr, "Cannot open generic netlink socket\n");
-			exit(1);
-		}
-
-		genl_family = genl_resolve_family(&genl_rth, L2TP_GENL_NAME);
-		if (genl_family < 0)
-			exit(1);
-	}
-
-	if (argc < 1)
+	if (argc < 1 || !matches(*argv, "help"))
 		usage();
+
+	if (genl_init_handle(&genl_rth, L2TP_GENL_NAME, &genl_family))
+		exit(1);
 
 	if (matches(*argv, "add") == 0)
 		return do_add(argc-1, argv+1);
@@ -742,8 +778,6 @@ int do_ipl2tp(int argc, char **argv)
 	    matches(*argv, "lst") == 0 ||
 	    matches(*argv, "list") == 0)
 		return do_show(argc-1, argv+1);
-	if (matches(*argv, "help") == 0)
-		usage();
 
 	fprintf(stderr, "Command \"%s\" is unknown, try \"ip l2tp help\".\n", *argv);
 	exit(-1);

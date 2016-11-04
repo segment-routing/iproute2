@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <limits.h>
 
 #ifdef HAVE_ELF
 #include <libelf.h>
@@ -51,6 +52,10 @@
 
 #ifndef AF_ALG
 #define AF_ALG 38
+#endif
+
+#ifndef EM_BPF
+#define EM_BPF 247
 #endif
 
 #ifdef HAVE_ELF
@@ -85,9 +90,8 @@ static int bpf(int cmd, union bpf_attr *attr, unsigned int size)
 static int bpf_map_update(int fd, const void *key, const void *value,
 			  uint64_t flags)
 {
-	union bpf_attr attr;
+	union bpf_attr attr = {};
 
-	memset(&attr, 0, sizeof(attr));
 	attr.map_fd = fd;
 	attr.key = bpf_ptr_to_u64(key);
 	attr.value = bpf_ptr_to_u64(value);
@@ -108,11 +112,9 @@ static int bpf_parse_string(char *arg, bool from_file, __u16 *bpf_len,
 		FILE *fp;
 
 		tmp_len = sizeof("4096,") + BPF_MAXINSNS * op_len;
-		tmp_string = malloc(tmp_len);
+		tmp_string = calloc(1, tmp_len);
 		if (tmp_string == NULL)
 			return -ENOMEM;
-
-		memset(tmp_string, 0, tmp_len);
 
 		fp = fopen(arg, "r");
 		if (fp == NULL) {
@@ -167,8 +169,7 @@ static int bpf_ops_parse(int argc, char **argv, struct sock_filter *bpf_ops,
 	token = bpf_string;
 	while ((token = strchr(token, separator)) && (++token)[0]) {
 		if (i >= bpf_len) {
-			fprintf(stderr, "Real program length exceeds encoded "
-				"length parameter!\n");
+			fprintf(stderr, "Real program length exceeds encoded length parameter!\n");
 			ret = -EINVAL;
 			goto out;
 		}
@@ -185,8 +186,7 @@ static int bpf_ops_parse(int argc, char **argv, struct sock_filter *bpf_ops,
 	}
 
 	if (i != bpf_len) {
-		fprintf(stderr, "Parsed program length is less than encoded"
-			"length parameter!\n");
+		fprintf(stderr, "Parsed program length is less than encoded length parameter!\n");
 		ret = -EINVAL;
 		goto out;
 	}
@@ -216,11 +216,35 @@ void bpf_print_ops(FILE *f, struct rtattr *bpf_ops, __u16 len)
 		ops[i].jf, ops[i].k);
 }
 
+static void bpf_map_pin_report(const struct bpf_elf_map *pin,
+			       const struct bpf_elf_map *obj)
+{
+	fprintf(stderr, "Map specification differs from pinned file!\n");
+
+	if (obj->type != pin->type)
+		fprintf(stderr, " - Type:         %u (obj) != %u (pin)\n",
+			obj->type, pin->type);
+	if (obj->size_key != pin->size_key)
+		fprintf(stderr, " - Size key:     %u (obj) != %u (pin)\n",
+			obj->size_key, pin->size_key);
+	if (obj->size_value != pin->size_value)
+		fprintf(stderr, " - Size value:   %u (obj) != %u (pin)\n",
+			obj->size_value, pin->size_value);
+	if (obj->max_elem != pin->max_elem)
+		fprintf(stderr, " - Max elems:    %u (obj) != %u (pin)\n",
+			obj->max_elem, pin->max_elem);
+	if (obj->flags != pin->flags)
+		fprintf(stderr, " - Flags:        %#x (obj) != %#x (pin)\n",
+			obj->flags, pin->flags);
+
+	fprintf(stderr, "\n");
+}
+
 static int bpf_map_selfcheck_pinned(int fd, const struct bpf_elf_map *map,
 				    int length)
 {
 	char file[PATH_MAX], buff[4096];
-	struct bpf_elf_map tmp, zero;
+	struct bpf_elf_map tmp = {}, zero = {};
 	unsigned int val;
 	FILE *fp;
 
@@ -232,7 +256,6 @@ static int bpf_map_selfcheck_pinned(int fd, const struct bpf_elf_map *map,
 		return -EIO;
 	}
 
-	memset(&tmp, 0, sizeof(tmp));
 	while (fgets(buff, sizeof(buff), fp)) {
 		if (sscanf(buff, "map_type:\t%u", &val) == 1)
 			tmp.type = val;
@@ -242,6 +265,8 @@ static int bpf_map_selfcheck_pinned(int fd, const struct bpf_elf_map *map,
 			tmp.size_value = val;
 		else if (sscanf(buff, "max_entries:\t%u", &val) == 1)
 			tmp.max_elem = val;
+		else if (sscanf(buff, "map_flags:\t%i", &val) == 1)
+			tmp.flags = val;
 	}
 
 	fclose(fp);
@@ -249,7 +274,6 @@ static int bpf_map_selfcheck_pinned(int fd, const struct bpf_elf_map *map,
 	if (!memcmp(&tmp, map, length)) {
 		return 0;
 	} else {
-		memset(&zero, 0, sizeof(zero));
 		/* If kernel doesn't have eBPF-related fdinfo, we cannot do much,
 		 * so just accept it. We know we do have an eBPF fd and in this
 		 * case, everything is 0. It is guaranteed that no such map exists
@@ -258,7 +282,7 @@ static int bpf_map_selfcheck_pinned(int fd, const struct bpf_elf_map *map,
 		if (!memcmp(&tmp, &zero, length))
 			return 0;
 
-		fprintf(stderr, "Map specs from pinned file differ!\n");
+		bpf_map_pin_report(&tmp, map);
 		return -EINVAL;
 	}
 }
@@ -385,7 +409,7 @@ int bpf_trace_pipe(void)
 
 static const char *bpf_get_tc_dir(void)
 {
-	static bool bpf_mnt_cached = false;
+	static bool bpf_mnt_cached;
 	static char bpf_tc_dir[PATH_MAX];
 	static const char *mnt;
 	static const char * const bpf_known_mnts[] = {
@@ -440,7 +464,7 @@ done:
 
 static int bpf_obj_get(const char *pathname)
 {
-	union bpf_attr attr;
+	union bpf_attr attr = {};
 	char tmp[PATH_MAX];
 
 	if (strlen(pathname) > 2 && pathname[0] == 'm' &&
@@ -450,7 +474,6 @@ static int bpf_obj_get(const char *pathname)
 		pathname = tmp;
 	}
 
-	memset(&attr, 0, sizeof(attr));
 	attr.pathname = bpf_ptr_to_u64(pathname);
 
 	return bpf(BPF_OBJ_GET, &attr, sizeof(attr));
@@ -648,8 +671,7 @@ int bpf_graft_map(const char *map_path, uint32_t *key, int argc, char **argv)
 	} else {
 		ret = sscanf(section, "%*i/%i", &map_key);
 		if (ret != 1) {
-			fprintf(stderr, "Couldn\'t infer map key from section "
-				"name! Please provide \'key\' argument!\n");
+			fprintf(stderr, "Couldn\'t infer map key from section name! Please provide \'key\' argument!\n");
 			ret = -EINVAL;
 			goto out_prog;
 		}
@@ -738,7 +760,19 @@ bpf_dump_error(struct bpf_elf_ctx *ctx, const char *format, ...)
 	va_end(vl);
 
 	if (ctx->log && ctx->log[0]) {
-		fprintf(stderr, "%s\n", ctx->log);
+		if (ctx->verbose) {
+			fprintf(stderr, "%s\n", ctx->log);
+		} else {
+			unsigned int off = 0, len = strlen(ctx->log);
+
+			if (len > BPF_MAX_LOG) {
+				off = len - BPF_MAX_LOG;
+				fprintf(stderr, "Skipped %u bytes, use \'verb\' option for the full verbose log.\n[...]\n",
+					off);
+			}
+			fprintf(stderr, "%s\n", ctx->log + off);
+		}
+
 		memset(ctx->log, 0, ctx->log_size);
 	}
 }
@@ -766,16 +800,17 @@ static int bpf_log_realloc(struct bpf_elf_ctx *ctx)
 	return 0;
 }
 
-static int bpf_map_create(enum bpf_map_type type, unsigned int size_key,
-			  unsigned int size_value, unsigned int max_elem)
+static int bpf_map_create(enum bpf_map_type type, uint32_t size_key,
+			  uint32_t size_value, uint32_t max_elem,
+			  uint32_t flags)
 {
-	union bpf_attr attr;
+	union bpf_attr attr = {};
 
-	memset(&attr, 0, sizeof(attr));
 	attr.map_type = type;
 	attr.key_size = size_key;
 	attr.value_size = size_value;
 	attr.max_entries = max_elem;
+	attr.map_flags = flags;
 
 	return bpf(BPF_MAP_CREATE, &attr, sizeof(attr));
 }
@@ -784,9 +819,8 @@ static int bpf_prog_load(enum bpf_prog_type type, const struct bpf_insn *insns,
 			 size_t size_insns, const char *license, char *log,
 			 size_t size_log)
 {
-	union bpf_attr attr;
+	union bpf_attr attr = {};
 
-	memset(&attr, 0, sizeof(attr));
 	attr.prog_type = type;
 	attr.insns = bpf_ptr_to_u64(insns);
 	attr.insn_cnt = size_insns / sizeof(struct bpf_insn);
@@ -803,9 +837,8 @@ static int bpf_prog_load(enum bpf_prog_type type, const struct bpf_insn *insns,
 
 static int bpf_obj_pin(int fd, const char *pathname)
 {
-	union bpf_attr attr;
+	union bpf_attr attr = {};
 
-	memset(&attr, 0, sizeof(attr));
 	attr.pathname = bpf_ptr_to_u64(pathname);
 	attr.bpf_fd = fd;
 
@@ -855,7 +888,7 @@ static int bpf_obj_hash(const char *object, uint8_t *out, size_t len)
 		goto out_ofd;
 	}
 
-        ret = fstat(ffd, &stbuff);
+	ret = fstat(ffd, &stbuff);
 	if (ret < 0) {
 		fprintf(stderr, "Error doing fstat: %s\n",
 			strerror(errno));
@@ -889,7 +922,7 @@ out_cfd:
 
 static const char *bpf_get_obj_uid(const char *pathname)
 {
-	static bool bpf_uid_cached = false;
+	static bool bpf_uid_cached;
 	static char bpf_uid[64];
 	uint8_t tmp[20];
 	int ret;
@@ -920,8 +953,7 @@ static int bpf_init_env(const char *pathname)
 	setrlimit(RLIMIT_MEMLOCK, &limit);
 
 	if (!bpf_get_tc_dir()) {
-		fprintf(stderr, "Continuing without mounted eBPF fs. "
-			"Too old kernel?\n");
+		fprintf(stderr, "Continuing without mounted eBPF fs. Too old kernel?\n");
 		return 0;
 	}
 
@@ -1059,14 +1091,16 @@ static void bpf_prog_report(int fd, const char *section,
 			    const struct bpf_elf_prog *prog,
 			    struct bpf_elf_ctx *ctx)
 {
-	fprintf(stderr, "Prog section \'%s\' %s%s (%d)!\n", section,
+	unsigned int insns = prog->size / sizeof(struct bpf_insn);
+
+	fprintf(stderr, "\nProg section \'%s\' %s%s (%d)!\n", section,
 		fd < 0 ? "rejected: " : "loaded",
 		fd < 0 ? strerror(errno) : "",
 		fd < 0 ? errno : fd);
 
 	fprintf(stderr, " - Type:         %u\n", prog->type);
-	fprintf(stderr, " - Instructions: %zu\n",
-		prog->size / sizeof(struct bpf_insn));
+	fprintf(stderr, " - Instructions: %u (%u over limit)\n",
+		insns, insns > BPF_MAXINSNS ? insns - BPF_MAXINSNS : 0);
 	fprintf(stderr, " - License:      %s\n\n", prog->license);
 
 	bpf_dump_error(ctx, "Verifier analysis:\n\n");
@@ -1091,8 +1125,7 @@ retry:
 			if (tries++ < 6 && !bpf_log_realloc(ctx))
 				goto retry;
 
-			fprintf(stderr, "Log buffer too small to dump "
-				"verifier log %zu bytes (%d tries)!\n",
+			fprintf(stderr, "Log buffer too small to dump verifier log %zu bytes (%d tries)!\n",
 				ctx->log_size, tries);
 			return fd;
 		}
@@ -1117,7 +1150,8 @@ static void bpf_map_report(int fd, const char *name,
 	fprintf(stderr, " - Pinning:      %u\n", map->pinning);
 	fprintf(stderr, " - Size key:     %u\n", map->size_key);
 	fprintf(stderr, " - Size value:   %u\n", map->size_value);
-	fprintf(stderr, " - Max elems:    %u\n\n", map->max_elem);
+	fprintf(stderr, " - Max elems:    %u\n", map->max_elem);
+	fprintf(stderr, " - Flags:        %#x\n\n", map->flags);
 }
 
 static int bpf_map_attach(const char *name, const struct bpf_elf_map *map,
@@ -1144,7 +1178,7 @@ static int bpf_map_attach(const char *name, const struct bpf_elf_map *map,
 
 	errno = 0;
 	fd = bpf_map_create(map->type, map->size_key, map->size_value,
-			    map->max_elem);
+			    map->max_elem, map->flags);
 	if (fd < 0 || ctx->verbose) {
 		bpf_map_report(fd, name, map, ctx);
 		if (fd < 0)
@@ -1288,6 +1322,11 @@ static int bpf_fetch_strtab(struct bpf_elf_ctx *ctx, int section,
 	return 0;
 }
 
+static bool bpf_has_map_data(const struct bpf_elf_ctx *ctx)
+{
+	return ctx->sym_tab && ctx->str_tab && ctx->sec_maps;
+}
+
 static int bpf_fetch_ancillary(struct bpf_elf_ctx *ctx)
 {
 	struct bpf_elf_sec_data data;
@@ -1311,13 +1350,13 @@ static int bpf_fetch_ancillary(struct bpf_elf_ctx *ctx)
 			 !strcmp(data.sec_name, ".strtab"))
 			ret = bpf_fetch_strtab(ctx, i, &data);
 		if (ret < 0) {
-			fprintf(stderr, "Error parsing section %d! Perhaps"
-				"check with readelf -a?\n", i);
+			fprintf(stderr, "Error parsing section %d! Perhaps check with readelf -a?\n",
+				i);
 			break;
 		}
 	}
 
-	if (ctx->sym_tab && ctx->str_tab && ctx->sec_maps) {
+	if (bpf_has_map_data(ctx)) {
 		ret = bpf_maps_attach_all(ctx);
 		if (ret < 0) {
 			fprintf(stderr, "Error loading maps into kernel!\n");
@@ -1353,7 +1392,7 @@ static int bpf_fetch_prog(struct bpf_elf_ctx *ctx, const char *section)
 
 		fd = bpf_prog_attach(section, &prog, ctx);
 		if (fd < 0)
-			continue;
+			break;
 
 		ctx->sec_done[i] = true;
 		break;
@@ -1383,21 +1422,18 @@ static int bpf_apply_relo_data(struct bpf_elf_ctx *ctx,
 		ioff = relo.r_offset / sizeof(struct bpf_insn);
 		if (ioff >= num_insns ||
 		    insns[ioff].code != (BPF_LD | BPF_IMM | BPF_DW)) {
-			fprintf(stderr, "ELF contains relo data for non ld64 "
-				"instruction at offset %u! Compiler bug?!\n",
+			fprintf(stderr, "ELF contains relo data for non ld64 instruction at offset %u! Compiler bug?!\n",
 				ioff);
 			if (ioff < num_insns &&
 			    insns[ioff].code == (BPF_JMP | BPF_CALL))
-				fprintf(stderr, " - Try to annotate functions "
-					"with always_inline attribute!\n");
+				fprintf(stderr, " - Try to annotate functions with always_inline attribute!\n");
 			return -EINVAL;
 		}
 
 		if (gelf_getsym(ctx->sym_tab, GELF_R_SYM(relo.r_info), &sym) != &sym)
 			return -EIO;
 		if (sym.st_shndx != ctx->sec_maps) {
-			fprintf(stderr, "ELF contains non-map related relo data in "
-				"entry %u pointing to section %u! Compiler bug?!\n",
+			fprintf(stderr, "ELF contains non-map related relo data in entry %u pointing to section %u! Compiler bug?!\n",
 				relo_ent, sym.st_shndx);
 			return -EIO;
 		}
@@ -1409,8 +1445,7 @@ static int bpf_apply_relo_data(struct bpf_elf_ctx *ctx,
 			return -EINVAL;
 
 		if (ctx->verbose)
-			fprintf(stderr, "Map \'%s\' (%d) injected into prog "
-				"section \'%s\' at offset %u!\n",
+			fprintf(stderr, "Map \'%s\' (%d) injected into prog section \'%s\' at offset %u!\n",
 				bpf_str_tab_name(ctx, &sym), ctx->map_fds[rmap],
 				data_insn->sec_name, ioff);
 
@@ -1421,7 +1456,8 @@ static int bpf_apply_relo_data(struct bpf_elf_ctx *ctx,
 	return 0;
 }
 
-static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section)
+static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section,
+			       bool *lderr)
 {
 	struct bpf_elf_sec_data data_relo, data_insn;
 	struct bpf_elf_prog prog;
@@ -1451,8 +1487,10 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section)
 		prog.license = ctx->license;
 
 		fd = bpf_prog_attach(section, &prog, ctx);
-		if (fd < 0)
-			continue;
+		if (fd < 0) {
+			*lderr = true;
+			break;
+		}
 
 		ctx->sec_done[i]   = true;
 		ctx->sec_done[idx] = true;
@@ -1464,11 +1502,12 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section)
 
 static int bpf_fetch_prog_sec(struct bpf_elf_ctx *ctx, const char *section)
 {
+	bool lderr = false;
 	int ret = -1;
 
-	if (ctx->sym_tab)
-		ret = bpf_fetch_prog_relo(ctx, section);
-	if (ret < 0)
+	if (bpf_has_map_data(ctx))
+		ret = bpf_fetch_prog_relo(ctx, section, &lderr);
+	if (ret < 0 && !lderr)
 		ret = bpf_fetch_prog(ctx, section);
 
 	return ret;
@@ -1513,8 +1552,12 @@ static int bpf_fill_prog_arrays(struct bpf_elf_ctx *ctx)
 
 		ret = bpf_map_update(ctx->map_fds[idx], &key_id,
 				     &fd, BPF_ANY);
-		if (ret < 0)
-			return -ENOENT;
+		if (ret < 0) {
+			if (errno == E2BIG)
+				fprintf(stderr, "Tail call key %u for map %u out of bounds?\n",
+					key_id, map_id);
+			return -errno;
+		}
 
 		ctx->sec_done[i] = true;
 	}
@@ -1580,7 +1623,7 @@ static bool bpf_pinning_reserved(uint32_t pinning)
 static void bpf_hash_init(struct bpf_elf_ctx *ctx, const char *db_file)
 {
 	struct bpf_hash_entry *entry;
-	char subpath[PATH_MAX];
+	char subpath[PATH_MAX] = {};
 	uint32_t pinning;
 	FILE *fp;
 	int ret;
@@ -1589,7 +1632,6 @@ static void bpf_hash_init(struct bpf_elf_ctx *ctx, const char *db_file)
 	if (!fp)
 		return;
 
-	memset(subpath, 0, sizeof(subpath));
 	while ((ret = bpf_read_pin_mapping(fp, &pinning, subpath))) {
 		if (ret == -1) {
 			fprintf(stderr, "Database %s is corrupted at: %s\n",
@@ -1599,8 +1641,8 @@ static void bpf_hash_init(struct bpf_elf_ctx *ctx, const char *db_file)
 		}
 
 		if (bpf_pinning_reserved(pinning)) {
-			fprintf(stderr, "Database %s, id %u is reserved - "
-				"ignoring!\n", db_file, pinning);
+			fprintf(stderr, "Database %s, id %u is reserved - ignoring!\n",
+				db_file, pinning);
 			continue;
 		}
 
@@ -1642,7 +1684,8 @@ static void bpf_hash_destroy(struct bpf_elf_ctx *ctx)
 static int bpf_elf_check_ehdr(const struct bpf_elf_ctx *ctx)
 {
 	if (ctx->elf_hdr.e_type != ET_REL ||
-	    ctx->elf_hdr.e_machine != 0 ||
+	    (ctx->elf_hdr.e_machine != EM_NONE &&
+	     ctx->elf_hdr.e_machine != EM_BPF) ||
 	    ctx->elf_hdr.e_version != EV_CURRENT) {
 		fprintf(stderr, "ELF format error, ELF file not for eBPF?\n");
 		return -EINVAL;
@@ -1816,15 +1859,13 @@ static int
 bpf_map_set_send(int fd, struct sockaddr_un *addr, unsigned int addr_len,
 		 const struct bpf_map_data *aux, unsigned int entries)
 {
-	struct bpf_map_set_msg msg;
+	struct bpf_map_set_msg msg = {
+		.aux.uds_ver = BPF_SCM_AUX_VER,
+		.aux.num_ent = entries,
+	};
 	int *cmsg_buf, min_fd;
 	char *amsg_buf;
 	int i;
-
-	memset(&msg, 0, sizeof(msg));
-
-	msg.aux.uds_ver = BPF_SCM_AUX_VER;
-	msg.aux.num_ent = entries;
 
 	strncpy(msg.aux.obj_name, aux->obj, sizeof(msg.aux.obj_name));
 	memcpy(&msg.aux.obj_st, aux->st, sizeof(msg.aux.obj_st));
@@ -1899,8 +1940,13 @@ bpf_map_set_recv(int fd, int *fds,  struct bpf_map_aux *aux,
 int bpf_send_map_fds(const char *path, const char *obj)
 {
 	struct bpf_elf_ctx *ctx = &__ctx;
-	struct sockaddr_un addr;
-	struct bpf_map_data bpf_aux;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	struct bpf_map_data bpf_aux = {
+		.fds = ctx->map_fds,
+		.ent = ctx->maps,
+		.st  = &ctx->stat,
+		.obj = obj,
+	};
 	int fd, ret;
 
 	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -1910,8 +1956,6 @@ int bpf_send_map_fds(const char *path, const char *obj)
 		return -1;
 	}
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path));
 
 	ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
@@ -1920,13 +1964,6 @@ int bpf_send_map_fds(const char *path, const char *obj)
 			path, strerror(errno));
 		return -1;
 	}
-
-	memset(&bpf_aux, 0, sizeof(bpf_aux));
-
-	bpf_aux.fds = ctx->map_fds;
-	bpf_aux.ent = ctx->maps;
-	bpf_aux.st  = &ctx->stat;
-	bpf_aux.obj = obj;
 
 	ret = bpf_map_set_send(fd, &addr, sizeof(addr), &bpf_aux,
 			       bpf_maps_count(ctx));
@@ -1942,7 +1979,7 @@ int bpf_send_map_fds(const char *path, const char *obj)
 int bpf_recv_map_fds(const char *path, int *fds, struct bpf_map_aux *aux,
 		     unsigned int entries)
 {
-	struct sockaddr_un addr;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	int fd, ret;
 
 	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -1952,8 +1989,6 @@ int bpf_recv_map_fds(const char *path, int *fds, struct bpf_map_aux *aux,
 		return -1;
 	}
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, path, sizeof(addr.sun_path));
 
 	ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
