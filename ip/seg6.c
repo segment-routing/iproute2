@@ -33,13 +33,9 @@ static void usage(void)
     fprintf(stderr, "Usage: ip sr/seg6 { COMMAND | help }\n");
     fprintf(stderr, "       ip sr hmac show\n");
     fprintf(stderr, "       ip sr hmac set KEYID ALGO\n");
-    fprintf(stderr, "       ip sr action { show | flush }\n");
-    fprintf(stderr, "       ip sr action add ADDRESS type TYPE [args]\n");
-    fprintf(stderr, "       ip sr action del ADDRESS\n");
     fprintf(stderr, "       ip sr tunsrc show\n");
     fprintf(stderr, "       ip sr tunsrc set ADDRESS\n");
-    fprintf(stderr, "where  TYPE := { override_next ADDRESS | nexthop ADDRESS }\n");
-    fprintf(stderr, "       ALGO := { sha1 | sha256 }\n");
+    fprintf(stderr, "where  ALGO := { sha1 | sha256 }\n");
     exit(-1);
 }
 
@@ -55,26 +51,8 @@ static struct {
     struct in6_addr addr;
     __u32 keyid;
     char *pass;
-    int bind_op;
-    struct in6_addr bind_data;
-    int bind_datalen;
-    int bind_flags;
     __u8 alg_id;
 } opts;
-
-static const char *op_to_str(int op)
-{
-    switch (op) {
-    case SEG6_BIND_ROUTE:
-        return "nexthop";
-    case SEG6_BIND_SERVICE:
-        return "service";
-    case SEG6_BIND_OVERRIDE_NEXT:
-        return "override_next";
-    }
-
-    return "<unknown>";
-}
 
 static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
 {
@@ -96,26 +74,6 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
     parse_rtattr(attrs, SEG6_ATTR_MAX, (void *)ghdr + GENL_HDRLEN, len);
 
     switch (ghdr->cmd) {
-    case SEG6_CMD_DUMPBIND:
-    {
-        __u8 op;
-
-        fprintf(fp, "%s ", rt_addr_n2a(AF_INET6, 16, RTA_DATA(attrs[SEG6_ATTR_DST]), abuf, sizeof(abuf)));
-
-        op = rta_getattr_u8(attrs[SEG6_ATTR_BIND_OP]);
-        fprintf(fp, "action %s ", op_to_str(op));
-
-        if (op == SEG6_BIND_ROUTE || op == SEG6_BIND_OVERRIDE_NEXT)
-            fprintf(fp, "addr %s ", rt_addr_n2a(AF_INET6, 16, RTA_DATA(attrs[SEG6_ATTR_BIND_DATA]), abuf, sizeof(abuf)));
-
-        if (op == SEG6_BIND_SERVICE) {
-            __u32 pid = rta_getattr_u32(attrs[SEG6_ATTR_BIND_DATA]);
-            fprintf(fp, "pid %u ", pid);
-        }
-
-        fprintf(fp, "\n");
-        break;
-    }
     case SEG6_CMD_DUMPHMAC:
     {
         char secret[64];
@@ -188,17 +146,6 @@ static int seg6_do_cmd(void)
     case SEG6_CMD_SET_TUNSRC:
         addattr_l(&req.n, sizeof(req), SEG6_ATTR_DST, &opts.addr, sizeof(struct in6_addr));
         break;
-    case SEG6_CMD_ADDBIND:
-        addattr_l(&req.n, sizeof(req), SEG6_ATTR_DST, &opts.addr, sizeof(struct in6_addr));
-        addattr8(&req.n, sizeof(req), SEG6_ATTR_BIND_OP, opts.bind_op);
-        addattr32(&req.n, sizeof(req), SEG6_ATTR_BIND_DATALEN, opts.bind_datalen);
-        addattr_l(&req.n, sizeof(req), SEG6_ATTR_BIND_DATA, &opts.bind_data, opts.bind_datalen);
-        addattr32(&req.n, sizeof(req), SEG6_ATTR_FLAGS, opts.bind_flags);
-        break;
-    case SEG6_CMD_DELBIND:
-        addattr_l(&req.n, sizeof(req), SEG6_ATTR_DST, &opts.addr, sizeof(struct in6_addr));
-        break;
-    case SEG6_CMD_DUMPBIND:
     case SEG6_CMD_DUMPHMAC:
         dump = 1;
         break;
@@ -259,48 +206,6 @@ int do_seg6(int argc, char **argv)
             }
             opts.cmd = SEG6_CMD_SETHMAC;
             opts.pass = getpass("Enter secret for HMAC key ID (blank to delete): ");
-        } else {
-            invarg("unknown", *argv);
-        }
-    } else if (matches(*argv, "action") == 0) {
-        NEXT_ARG();
-        if (matches(*argv, "show") == 0) {
-            opts.cmd = SEG6_CMD_DUMPBIND;
-        } else if (matches(*argv, "flush") == 0) {
-            opts.cmd = SEG6_CMD_FLUSHBIND;
-        } else if (matches(*argv, "add") == 0) {
-            NEXT_ARG();
-            opts.cmd = SEG6_CMD_ADDBIND;
-            if (!inet_get_addr(*argv, NULL, &opts.addr))
-                invarg("action add ADDRESS value is invalid", *argv);
-            NEXT_ARG();
-            if (matches(*argv, "type") == 0) {
-                NEXT_ARG();
-                if (matches(*argv, "override_next") == 0) {
-                    NEXT_ARG();
-                    opts.bind_op = SEG6_BIND_OVERRIDE_NEXT;
-                    if (!inet_get_addr(*argv, NULL, &opts.bind_data))
-                        invarg("override_next ADDRESS value is invalid", *argv);
-                    opts.bind_datalen = 16;
-                } else if (matches(*argv, "nexthop") == 0) {
-                    NEXT_ARG();
-                    opts.bind_op = SEG6_BIND_ROUTE;
-                    if (!inet_get_addr(*argv, NULL, &opts.bind_data))
-                        invarg("nexthop ADDRESS value is invalid", *argv);
-                    opts.bind_datalen = 16;
-                } else {
-                    invarg("unknown", *argv);
-                }
-            } else if (matches(*argv, "overwrite") == 0) {
-                opts.bind_flags = SEG6_BIND_FLAG_OVERRIDE;
-            } else {
-                invarg("unknown", *argv);
-            }
-        } else if (matches(*argv, "del") == 0) {
-            NEXT_ARG();
-            opts.cmd = SEG6_CMD_DELBIND;
-            if (!inet_get_addr(*argv, NULL, &opts.addr))
-                invarg("action del ADDRESS value is invalid", *argv);
         } else {
             invarg("unknown", *argv);
         }
