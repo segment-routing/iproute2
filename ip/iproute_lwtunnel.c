@@ -77,7 +77,6 @@ static void print_encap_mpls(FILE *fp, struct rtattr *encap)
 static void print_encap_seg6(FILE *fp, struct rtattr *encap)
 {
     struct rtattr *tb[SEG6_IPTUNNEL_MAX+1];
-    char abuf[256];
     struct seg6_iptunnel_encap *tuninfo;
     struct ipv6_sr_hdr *srh;
     int i;
@@ -95,7 +94,7 @@ static void print_encap_seg6(FILE *fp, struct rtattr *encap)
     fprintf(fp, "segs %d [ ", srh->first_segment + 1);
 
     for (i = srh->first_segment; i >= 0; i--)
-        fprintf(fp, "%s ", rt_addr_n2a(AF_INET6, 16, &srh->segments[i], abuf, sizeof(abuf)));
+        fprintf(fp, "%s ", rt_addr_n2a(AF_INET6, 16, &srh->segments[i]));
 
     fprintf(fp, "] ");
 

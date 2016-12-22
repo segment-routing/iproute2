@@ -60,7 +60,6 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
     struct genlmsghdr *ghdr;
     struct rtattr *attrs[SEG6_ATTR_MAX + 1];
     int len = n->nlmsg_len;
-    char abuf[256];
 
     if (n->nlmsg_type != genl_family)
         return -1;
@@ -109,7 +108,7 @@ static int process_msg(const struct sockaddr_nl *who, struct nlmsghdr *n, void *
     }
     case SEG6_CMD_GET_TUNSRC:
     {
-        fprintf(fp, "tunsrc addr %s\n", rt_addr_n2a(AF_INET6, 16, RTA_DATA(attrs[SEG6_ATTR_DST]), abuf, sizeof(abuf)));
+        fprintf(fp, "tunsrc addr %s\n", rt_addr_n2a(AF_INET6, 16, RTA_DATA(attrs[SEG6_ATTR_DST])));
         break;
     }
     }
